@@ -3,67 +3,62 @@ import random
 import math
 
 class IteratedLocalSearch(technique.SequentialSearchTechnique):
-    def probabilistic_improvement(self, start, max_step, acceptance):
-        param = random.choice(self.manipulator.parameters(start.data))
-
-        if param.is_primitive():
-            unit_value = param.get_unit_value(start.data)
-            proposal = self.manipulator.copy(start.data)
-            new_unit_value = unit_value - (random.random() * max_step)
-
-            if new_unit_value < 0.0:
-                new_unit_value = min(1.0, unit_value + (random.random() * max_step))
-
-            param.set_unit(proposal, new_unit_value)
-            proposal = driver.get_configuration(proposal)
-
-        difference = self.objective.compare(proposal, start)
-        acceptance_prob = math.exp(difference / acceptance)
-
-        if random.random() <= acceptance_prob or self.objective.lt(proposal, start):
-            return proposal
-        else:
-            return start
-
     def main_generator(self):
         objective   = self.objective
         driver      = self.driver
         manipulator = self.manipulator
-        acceptance  = 0.5
-        max_step    = 0.25
-        iterations  = 50
+        acceptance  = 0.2
+        max_step    = 0.01
+        iterations  = 250
 
         # start at a random position
-        start = driver.get_configuration(manipulator.random())
-        yield start
-
-        # initial step size is arbitrary
-        step_size = 0.1
+        center = driver.get_configuration(manipulator.random())
+        yield center
 
         while True:
-            param = random.choice(self.manipulator.parameters(start.data))
-
-            if param.is_primitive():
-                unit_value = param.get_unit_value(start.data)
-                proposal = self.manipulator.copy(start.data)
-                new_unit_value = unit_value - (random.random() * max_step)
-
-                if new_unit_value < 0.0:
-                    new_unit_value = min(1.0, unit_value + (random.random() * max_step))
-
-                param.set_unit(proposal, new_unit_value)
-                proposal = driver.get_configuration(proposal)
-
+            points = list()
+            # Iterations of the subsidiary local search
+            # (probabilistic improvement)
             for i in range(iterations):
-                proposal = self.probabilistic_improvement(proposal, max_step, acceptance)
-                yield start
+                old_center = center
+                # Perturb starting point,
+                # generating candidates
+                for param in self.manipulator.parameters(center.data):
+                    if param.is_primitive():
+                        unit_value = param.get_unit_value(center.data)
+                        if unit_value > 0.0:
+                            # produce new config with param set step_size lower
+                            down_cfg = manipulator.copy(center.data)
+                            param.set_unit_value(down_cfg, max(0.0, unit_value - (random.random() * max_step)))
+                            down_cfg = driver.get_configuration(down_cfg)
+                            self.yield_nonblocking(down_cfg)
+                            points.append(down_cfg)
+                        if unit_value < 1.0:
+                            # produce new config with param set step_size higher
+                            up_cfg = manipulator.copy(center.data)
+                            param.set_unit_value(up_cfg, min(1.0, unit_value + (random.random() * max_step)))
+                            up_cfg = driver.get_configuration(up_cfg)
+                            self.yield_nonblocking(up_cfg)
+                            points.append(up_cfg)
+                        else: # ComplexParameter
+                            for mutate_function in param.manipulators(center.data):
+                                cfg = manipulator.copy(center.data)
+                                mutate_function(cfg)
+                                cfg = driver.get_configuration(cfg)
+                                self.yield_nonblocking(cfg)
+                                points.append(cfg)
+                yield None
+                points.sort(cmp=objective.compare)
+                # For this iteration, move if the new point is best
+                # than the starting point.
+                if objective.lt(points[0], center) or random.random() <= acceptance:
+                    center = points[0]
 
-            difference = self.objective.compare(proposal, start)
-            acceptance_prob = math.exp(difference / acceptance)
-
-            if random.random() <= acceptance_prob or self.objective.lt(proposal, start):
-                start = proposal
-
-            yield start
+            if (objective.lt(driver.best_result.configuration, center)
+                and driver.best_result.configuration != points[0]):
+                # another technique found a new global best, switch to that
+                center = driver.best_result.configuration
+            elif objective.lt(old_center, center) or random.random() <= acceptance:
+                center = old_center
 
 technique.register(IteratedLocalSearch())
